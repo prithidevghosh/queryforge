@@ -7,7 +7,10 @@ from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
 from openenv.core.env_server.types import State
 
-from .models import SQLAction, SQLObservation, TaskSpec
+try:
+    from .models import SQLAction, SQLObservation, TaskSpec
+except ImportError:
+    from models import SQLAction, SQLObservation, TaskSpec
 
 
 class QueryforgeEnv(EnvClient[SQLAction, SQLObservation, State]):
