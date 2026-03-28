@@ -40,7 +40,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 _AI_JUDGE_ACTIVE = bool(os.environ.get("ANTHROPIC_API_KEY"))
 
-print("here", os.environ.get("ANTHROPIC_API_KEY"))
 logger.info(
     "QueryForge environment loaded | AI judge: %s | done_threshold: %s",
     "ACTIVE (scores up to 1.0)" if _AI_JUDGE_ACTIVE else "OFFLINE — deterministic only (max score 0.80)",
