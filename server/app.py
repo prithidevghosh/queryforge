@@ -44,6 +44,7 @@ except ImportError:
     from tasks import REGISTRY, task_from_dict
     from server.queryforge_environment import QueryforgeEnvironment
 
+import gradio as gr
 from fastapi import HTTPException
 
 
@@ -86,6 +87,18 @@ async def delete_task(task_id: str):
         raise HTTPException(status_code=403, detail=str(exc))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
+
+
+# ── Gradio demo — mounted at /demo so the HF Space App tab shows it ───────────
+
+try:
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from demo import demo as gradio_demo
+    app = gr.mount_gradio_app(app, gradio_demo, path="/demo")
+except Exception as _e:
+    import warnings
+    warnings.warn(f"Gradio demo not mounted: {_e}")
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):
