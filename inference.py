@@ -29,13 +29,20 @@ from models import SQLAction
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 MODEL_NAME   = os.getenv("MODEL_NAME")
-ENV_URL      = os.getenv("ENV_URL", "http://localhost:8000")
+ENV_URL      = os.getenv("ENV_URL", "http://127.0.0.1:8000")
 
 MAX_STEPS   = 5      # max attempts per task (overridden by task's own max_steps)
 TEMPERATURE = 0.2
 MAX_TOKENS  = 512
 
-TASK_IDS = ["task_easy_syntax", "task_medium_join", "task_hard_cte"]
+TASK_IDS = [
+    "task_easy_syntax",
+    "task_medium_join",
+    "task_hard_cte",
+    "task_expert_rank",
+    "task_expert_recursive",
+    "task_expert_window",
+]
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -120,14 +127,40 @@ def run_task(task_id: str, llm: OpenAI, env_client) -> dict:
             break
 
         sql = extract_sql(response_text)
+
+        # ── Print generated SQL ───────────────────────────────────────────────
+        print(f"\n  ┌─ Step {step} · SQL submitted {'─' * (50 - len(str(step)))}")
+        for line in sql.splitlines():
+            print(f"  │  {line}")
+        print(f"  └{'─' * 56}")
+
         result = env_client.step(SQLAction(sql=sql))
         obs = result.observation
 
-        status = "✓ DONE" if result.done else f"step {step}"
-        print(f"  [{status}]  Score: {score_bar(result.reward or 0.0)}")
+        score = result.reward or 0.0
+        done_marker = "  ✓ DONE" if result.done else ""
+        print(f"  Score : {score_bar(score)}{done_marker}")
+
+        if not obs.syntax_valid:
+            print(f"  ✗ Syntax error — query could not be parsed")
+        elif not obs.execution_success:
+            print(f"  ✗ Execution failed — {(obs.execution_error or '')[:80]}")
+        else:
+            print(f"  ✓ Executed · rows returned: {obs.rows_returned}")
 
         if result.done:
             break
+
+        # ── Why are we going to the next step? ───────────────────────────────
+        print(f"\n  ↻ Retrying — score {score:.3f} below threshold")
+        if obs.feedback:
+            # Split the feedback into its tagged sections for readable multi-line output
+            for part in obs.feedback.split("  "):
+                part = part.strip()
+                if part:
+                    print(f"  {part}")
+        if obs.hint:
+            print(f"  Hint     : {obs.hint[:120]}")
 
         # Feed grading result back to the model for the next attempt
         messages.append({"role": "assistant", "content": response_text})

@@ -282,18 +282,22 @@ Respond with ONLY valid JSON (no markdown fences):
 
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-6",
+            model=JUDGE_MODEL,
             max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "user",      "content": prompt},
+                {"role": "assistant", "content": "{"},   # prefill forces JSON-only reply
+            ],
         )
-        raw = message.content[0].text.strip()
+        print("Anthropic judge response:", message.content)
+        # Prepend the prefilled "{" back before parsing
+        raw = "{" + message.content[0].text.strip()
 
-        # Strip accidental markdown fences
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.rsplit("```", 1)[0].strip()
+        # Belt-and-suspenders: extract the first {...} block in case of any preamble
+        brace_start = raw.find("{")
+        brace_end   = raw.rfind("}") + 1
+        if brace_start != -1 and brace_end > brace_start:
+            raw = raw[brace_start:brace_end]
 
         data = json.loads(raw)
         score = float(data["score"])
@@ -305,14 +309,13 @@ Respond with ONLY valid JSON (no markdown fences):
     except Exception as exc:
         # Graceful fallback — no API key, network error, or parse failure
         msg = str(exc).lower()
-        reason = (
-            "no ANTHROPIC_API_KEY set"
-            if "api_key" in msg or "auth" in msg or "authentication" in msg
-            else type(exc).__name__
-        )
+        if "api_key" in msg or "auth" in msg or "authentication" in msg:
+            reason = "ANTHROPIC_API_KEY not set — deterministic scoring only (max 0.80)"
+        else:
+            reason = f"AI judge call failed ({type(exc).__name__}) — fell back to deterministic score"
         return (
             deterministic_score,
-            f"AI judge offline ({reason}). Using deterministic score.",
+            f"[AI Judge unavailable] {reason}.",
             task.hint,
         )
 
@@ -378,6 +381,15 @@ def grade(
     elif task.level == "medium" and "JOIN " not in query_upper:
         structural_penalty = 0.20  # medium task demands explicit JOINs
         row_feedback += " (Penalty: no explicit JOIN — task requires JOIN … ON syntax.)"
+    elif task.id == "task_expert_recursive" and "RECURSIVE" not in query_upper:
+        structural_penalty = 0.30  # must use recursive CTE, not repeated JOINs
+        row_feedback += " (Penalty: WITH RECURSIVE required — plain JOIN only fetches one level.)"
+    elif task.id == "task_expert_rank" and "ROW_NUMBER" in query_upper:
+        structural_penalty = 0.20  # ROW_NUMBER breaks ties — must use RANK/DENSE_RANK
+        row_feedback += " (Penalty: ROW_NUMBER() drops tied rows — use RANK() or DENSE_RANK().)"
+    elif task.id == "task_expert_window" and "PARTITION BY" not in query_upper:
+        structural_penalty = 0.20  # both window functions need PARTITION BY region
+        row_feedback += " (Penalty: missing PARTITION BY — both SUM and RANK must be partitioned per region.)"
 
     details["structural_penalty"] = structural_penalty
 

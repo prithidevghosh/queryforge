@@ -20,6 +20,8 @@ Episode ends when:
   - max_steps for the task is exhausted
 """
 
+import logging
+import os
 from typing import Optional
 from uuid import uuid4
 
@@ -34,6 +36,16 @@ except ImportError:
     from models import SQLAction, SQLObservation
     from tasks import REGISTRY, SQLTask
     from judge import grade
+
+logger = logging.getLogger(__name__)
+_AI_JUDGE_ACTIVE = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+print("here", os.environ.get("ANTHROPIC_API_KEY"))
+logger.info(
+    "QueryForge environment loaded | AI judge: %s | done_threshold: %s",
+    "ACTIVE (scores up to 1.0)" if _AI_JUDGE_ACTIVE else "OFFLINE — deterministic only (max score 0.80)",
+    "0.90" if _AI_JUDGE_ACTIVE else "0.80",
+)
 
 
 class QueryforgeEnvironment(Environment):
@@ -97,6 +109,12 @@ class QueryforgeEnvironment(Environment):
         self._attempt = 0
         self._stale_steps = 0
 
+        logger.info(
+            "reset() | task_id=%s | AI judge: %s",
+            task_id or "round-robin",
+            "ACTIVE" if _AI_JUDGE_ACTIVE else "OFFLINE",
+        )
+
         if task_id is not None:
             try:
                 self._current_task = REGISTRY.get(task_id)
@@ -142,6 +160,12 @@ class QueryforgeEnvironment(Environment):
                 reward=0.0,
             )
 
+        logger.info(
+            "step() | task=%s | attempt=%d | AI judge: %s",
+            self._current_task.id,
+            self._attempt,
+            "ACTIVE" if _AI_JUDGE_ACTIVE else "OFFLINE",
+        )
         score, feedback, details = grade(self._current_task, action.sql)
 
         # Fix 1 — early stopping: track consecutive steps with no improvement

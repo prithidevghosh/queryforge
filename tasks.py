@@ -263,6 +263,283 @@ ORDER BY e.department_id, e.salary DESC""",
 )
 
 
+# ── Expert tasks ──────────────────────────────────────────────────────────────
+
+_TASK_EXPERT_RANK = SQLTask(
+    id="task_expert_rank",
+    level="expert",
+    title="Fix the Tie-Breaking Window Function",
+    description="""\
+TASK: The query below finds the top-earning sales rep per region, but it
+silently drops reps who are tied for first place. Fix it so ALL reps
+tied at rank 1 are returned.
+
+SCHEMA:
+  sales_reps(id INTEGER, name VARCHAR, region VARCHAR, revenue DECIMAL)
+
+BROKEN QUERY:
+  SELECT name, region, revenue
+  FROM (
+      SELECT name, region, revenue,
+             ROW_NUMBER() OVER (PARTITION BY region ORDER BY revenue DESC) AS rn
+      FROM sales_reps
+  ) ranked
+  WHERE rn = 1
+  ORDER BY region, name
+
+PROBLEM:
+  ROW_NUMBER() assigns unique sequential numbers even for tied revenue values.
+  When two reps share the top revenue in a region, ROW_NUMBER arbitrarily
+  picks one and discards the other.
+
+GOAL: Return ALL reps whose revenue is the highest in their region.
+     Use RANK() or DENSE_RANK() instead of ROW_NUMBER().
+     Order by region ASC, name ASC.""",
+    schema_ddl="""\
+CREATE TABLE sales_reps (id INTEGER, name VARCHAR, region VARCHAR, revenue DECIMAL);
+INSERT INTO sales_reps VALUES
+    (1, 'Alice', 'North', 95000),
+    (2, 'Bob',   'North', 87000),
+    (3, 'Carol', 'North', 95000),
+    (4, 'Dave',  'South', 88000),
+    (5, 'Eve',   'South', 88000),
+    (6, 'Frank', 'South', 75000);
+""",
+    broken_query="""\
+SELECT name, region, revenue
+FROM (
+    SELECT name, region, revenue,
+           ROW_NUMBER() OVER (PARTITION BY region ORDER BY revenue DESC) AS rn
+    FROM sales_reps
+) ranked
+WHERE rn = 1
+ORDER BY region, name""",
+    error_message=(
+        "Query runs but returns only 2 rows — one per region. "
+        "Tied reps at the top are silently dropped by ROW_NUMBER()."
+    ),
+    hint="Replace ROW_NUMBER() with RANK() or DENSE_RANK(). Both include all tied rows.",
+    test_cases=[
+        TestCase(
+            description="All reps tied at rank 1 per region",
+            expected_rows=[
+                {"name": "Alice", "region": "North", "revenue": 95000.0},
+                {"name": "Carol", "region": "North", "revenue": 95000.0},
+                {"name": "Dave",  "region": "South", "revenue": 88000.0},
+                {"name": "Eve",   "region": "South", "revenue": 88000.0},
+            ],
+            order_by="region,name",
+        )
+    ],
+    solution_query="""\
+SELECT name, region, revenue
+FROM (
+    SELECT name, region, revenue,
+           RANK() OVER (PARTITION BY region ORDER BY revenue DESC) AS rk
+    FROM sales_reps
+) ranked
+WHERE rk = 1
+ORDER BY region, name""",
+    max_steps=6,
+)
+
+
+_TASK_EXPERT_RECURSIVE = SQLTask(
+    id="task_expert_recursive",
+    level="expert",
+    title="Traverse Org Chart with Recursive CTE",
+    description="""\
+TASK: The query below attempts to find all subordinates of the VP of Engineering
+(id=3) using a two-level CTE expansion. It misses employees more than two levels
+deep. Rewrite it using a recursive CTE that traverses all levels.
+
+SCHEMA:
+  employees(id INTEGER, name VARCHAR, manager_id INTEGER)
+
+DATA (partial):
+  VP Eng (id=3) → Lead A (id=5), Lead B (id=6)
+  Lead A (id=5) → Dev 1 (id=8), Dev 2 (id=9)
+  Lead B (id=6) → Dev 3 (id=10), Dev 4 (id=11)
+  Dev 1 (id=8)  → Junior 1 (id=13), Junior 2 (id=14)
+
+BROKEN QUERY:
+  WITH direct AS (
+      SELECT id, name, manager_id FROM employees WHERE manager_id = 3
+  ),
+  level2 AS (
+      SELECT e.id, e.name, e.manager_id
+      FROM employees e
+      INNER JOIN direct d ON e.manager_id = d.id
+  )
+  SELECT id, name, manager_id FROM direct
+  UNION ALL
+  SELECT id, name, manager_id FROM level2
+  ORDER BY id
+
+PROBLEM:
+  This hardcoded two-level expansion returns 6 rows but misses Junior 1 (id=13)
+  and Junior 2 (id=14), who report to Dev 1 — three levels below VP Eng.
+  Adding a level3 CTE would help for now but still break if the tree grows deeper.
+
+GOAL: Use WITH RECURSIVE to return ALL 8 subordinates of VP Eng (id=3)
+     at any depth. Return id, name, manager_id columns, ordered by id ASC.""",
+    schema_ddl="""\
+CREATE TABLE employees (id INTEGER, name VARCHAR, manager_id INTEGER);
+INSERT INTO employees VALUES
+    (1,  'CEO',      NULL),
+    (2,  'CFO',      1),
+    (3,  'VP Eng',   1),
+    (4,  'VP Sales', 1),
+    (5,  'Lead A',   3),
+    (6,  'Lead B',   3),
+    (7,  'Sales Mgr',4),
+    (8,  'Dev 1',    5),
+    (9,  'Dev 2',    5),
+    (10, 'Dev 3',    6),
+    (11, 'Dev 4',    6),
+    (12, 'Sales Rep',7),
+    (13, 'Junior 1', 8),
+    (14, 'Junior 2', 8);
+""",
+    broken_query="""\
+WITH direct AS (
+    SELECT id, name, manager_id FROM employees WHERE manager_id = 3
+),
+level2 AS (
+    SELECT e.id, e.name, e.manager_id
+    FROM employees e
+    INNER JOIN direct d ON e.manager_id = d.id
+)
+SELECT id, name, manager_id FROM direct
+UNION ALL
+SELECT id, name, manager_id FROM level2
+ORDER BY id""",
+    error_message=(
+        "Query returns only 6 rows — two levels under VP Eng. "
+        "Junior 1 (id=13) and Junior 2 (id=14) who report to Dev 1 are missing. "
+        "A hardcoded level3 CTE would fix this instance but not scale to deeper trees."
+    ),
+    hint="Use WITH RECURSIVE. Start from manager_id = 3, then JOIN employees to the CTE itself on manager_id = cte.id.",
+    test_cases=[
+        TestCase(
+            description="All 8 subordinates of VP Eng at any depth",
+            expected_rows=[
+                {"id": 5,  "name": "Lead A",   "manager_id": 3},
+                {"id": 6,  "name": "Lead B",   "manager_id": 3},
+                {"id": 8,  "name": "Dev 1",    "manager_id": 5},
+                {"id": 9,  "name": "Dev 2",    "manager_id": 5},
+                {"id": 10, "name": "Dev 3",    "manager_id": 6},
+                {"id": 11, "name": "Dev 4",    "manager_id": 6},
+                {"id": 13, "name": "Junior 1", "manager_id": 8},
+                {"id": 14, "name": "Junior 2", "manager_id": 8},
+            ],
+            order_by="id",
+        )
+    ],
+    solution_query="""\
+WITH RECURSIVE subordinates AS (
+    SELECT id, name, manager_id
+    FROM employees
+    WHERE manager_id = 3
+    UNION ALL
+    SELECT e.id, e.name, e.manager_id
+    FROM employees e
+    INNER JOIN subordinates s ON e.manager_id = s.id
+)
+SELECT id, name, manager_id
+FROM subordinates
+ORDER BY id""",
+    max_steps=7,
+)
+
+
+_TASK_EXPERT_WINDOW = SQLTask(
+    id="task_expert_window",
+    level="expert",
+    title="Fix Two Broken Window Functions: Running Total and Revenue Rank",
+    description="""\
+TASK: The query below computes a cumulative running total and a
+within-region revenue rank for each quarter, but BOTH window functions
+are broken — neither has a PARTITION BY, so they treat all rows as one
+giant partition instead of computing independently per region.
+
+SCHEMA:
+  quarterly_sales(region VARCHAR, quarter INTEGER, revenue DECIMAL)
+
+BROKEN QUERY:
+  SELECT region, quarter, revenue,
+         SUM(revenue) OVER (ORDER BY region, quarter)        AS running_total,
+         RANK()       OVER (ORDER BY revenue DESC)            AS revenue_rank
+  FROM quarterly_sales
+  ORDER BY region, quarter
+
+PROBLEM:
+  - running_total accumulates across both regions: West's Q1 shows 65000
+    (continuing from East's Q4) instead of resetting to 11000.
+  - revenue_rank ranks revenue across ALL regions globally, so East Q4 (20000)
+    and West Q3 (16000) compete directly instead of being ranked within their
+    own region.
+
+GOAL: Fix BOTH window functions so they operate independently per region.
+     - running_total must reset to 0 at the start of each region (ORDER BY quarter).
+     - revenue_rank must rank revenue within each region (ORDER BY revenue DESC).
+     Both OVER clauses need PARTITION BY region, but with different ORDER BY columns.
+     Final output: ORDER BY region ASC, quarter ASC.""",
+    schema_ddl="""\
+CREATE TABLE quarterly_sales (region VARCHAR, quarter INTEGER, revenue DECIMAL);
+INSERT INTO quarterly_sales VALUES
+    ('East', 1, 15000),
+    ('East', 2, 18000),
+    ('East', 3, 12000),
+    ('East', 4, 20000),
+    ('West', 1, 11000),
+    ('West', 2, 14000),
+    ('West', 3, 16000),
+    ('West', 4, 13000);
+""",
+    broken_query="""\
+SELECT region, quarter, revenue,
+       SUM(revenue) OVER (ORDER BY region, quarter) AS running_total,
+       RANK()       OVER (ORDER BY revenue DESC)    AS revenue_rank
+FROM quarterly_sales
+ORDER BY region, quarter""",
+    error_message=(
+        "Query runs but both window functions are wrong. "
+        "West Q1 running_total shows 76000 (continuing from East) instead of 11000. "
+        "revenue_rank is a global ranking across all 8 rows instead of per-region. "
+        "Both SUM and RANK are missing PARTITION BY region."
+    ),
+    hint=(
+        "Add PARTITION BY region to BOTH window functions, but with different ORDER BY: "
+        "SUM(revenue) OVER (PARTITION BY region ORDER BY quarter) for running total, "
+        "RANK() OVER (PARTITION BY region ORDER BY revenue DESC) for within-region rank."
+    ),
+    test_cases=[
+        TestCase(
+            description="Per-region running total and within-region revenue rank",
+            expected_rows=[
+                {"region": "East", "quarter": 1, "revenue": 15000.0, "running_total": 15000.0, "revenue_rank": 3},
+                {"region": "East", "quarter": 2, "revenue": 18000.0, "running_total": 33000.0, "revenue_rank": 2},
+                {"region": "East", "quarter": 3, "revenue": 12000.0, "running_total": 45000.0, "revenue_rank": 4},
+                {"region": "East", "quarter": 4, "revenue": 20000.0, "running_total": 65000.0, "revenue_rank": 1},
+                {"region": "West", "quarter": 1, "revenue": 11000.0, "running_total": 11000.0, "revenue_rank": 4},
+                {"region": "West", "quarter": 2, "revenue": 14000.0, "running_total": 25000.0, "revenue_rank": 3},
+                {"region": "West", "quarter": 3, "revenue": 16000.0, "running_total": 41000.0, "revenue_rank": 1},
+                {"region": "West", "quarter": 4, "revenue": 13000.0, "running_total": 54000.0, "revenue_rank": 2},
+            ],
+            order_by="region,quarter",
+        )
+    ],
+    solution_query="""\
+SELECT region, quarter, revenue,
+       SUM(revenue) OVER (PARTITION BY region ORDER BY quarter)        AS running_total,
+       RANK()       OVER (PARTITION BY region ORDER BY revenue DESC)   AS revenue_rank
+FROM quarterly_sales
+ORDER BY region, quarter""",
+    max_steps=6,
+)
+
+
 # ── Task Registry ─────────────────────────────────────────────────────────────
 
 class TaskRegistry:
@@ -273,9 +550,10 @@ class TaskRegistry:
     Custom tasks can be added via register(), load_from_json(), or POST /tasks.
     """
 
-    _BUILTIN_IDS: frozenset = frozenset(
-        ["task_easy_syntax", "task_medium_join", "task_hard_cte"]
-    )
+    _BUILTIN_IDS: frozenset = frozenset([
+        "task_easy_syntax", "task_medium_join", "task_hard_cte",
+        "task_expert_rank", "task_expert_recursive", "task_expert_window",
+    ])
 
     def __init__(self, initial_tasks: List[SQLTask]) -> None:
         self._lock = Lock()
@@ -408,8 +686,14 @@ def task_from_dict(d: Dict[str, Any]) -> SQLTask:
 
 # ── Global singleton ──────────────────────────────────────────────────────────
 
-REGISTRY = TaskRegistry([_TASK_EASY, _TASK_MEDIUM, _TASK_HARD])
+REGISTRY = TaskRegistry([
+    _TASK_EASY, _TASK_MEDIUM, _TASK_HARD,
+    _TASK_EXPERT_RANK, _TASK_EXPERT_RECURSIVE, _TASK_EXPERT_WINDOW,
+])
 
-# Backwards-compat: snapshot of the three built-in tasks at import time
-TASKS: List[SQLTask] = [_TASK_EASY, _TASK_MEDIUM, _TASK_HARD]
+# Backwards-compat: snapshot of all built-in tasks at import time
+TASKS: List[SQLTask] = [
+    _TASK_EASY, _TASK_MEDIUM, _TASK_HARD,
+    _TASK_EXPERT_RANK, _TASK_EXPERT_RECURSIVE, _TASK_EXPERT_WINDOW,
+]
 TASK_BY_ID: Dict[str, SQLTask] = {t.id: t for t in TASKS}
