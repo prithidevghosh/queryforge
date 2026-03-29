@@ -15,6 +15,13 @@ tags:
 
 # QueryForge — SQL Debugging & Optimisation Environment
 
+**Live environment:** https://prithvigg-queryforge.hf.space
+**Interactive demo:** https://prithvigg-queryforge.hf.space/demo/
+
+> Try it directly below (HF Space viewer only):
+>
+> <iframe src="https://prithvigg-queryforge.hf.space/demo/" width="100%" height="700px" frameborder="0"></iframe>
+
 SQL is the language that runs the world's data infrastructure. Yet SQL bugs are silent killers — a missing JOIN condition inflates totals by 3×, a correlated subquery scans a million rows once per row, a typo in a keyword stops production cold. These bugs are rarely caught by linters, rarely surfaced by error messages, and routinely shipped to production.
 
 QueryForge is an **OpenEnv-compatible reinforcement learning environment** where an agent learns to debug and optimise SQL queries. The agent receives a broken or slow query, submits fixes, and receives graded feedback from a deterministic DuckDB engine combined with an Anthropic AI quality judge — a smooth, informative reward signal across the full 0.0 → 1.0 range.
@@ -109,28 +116,57 @@ class SQLObservation(Observation):
 
 ## Built-in Tasks
 
+| ID | Level | Title | Max Steps |
+|---|---|---|---|
+| `task_easy_syntax` | easy | Fix Syntax Errors | 5 |
+| `task_medium_join` | medium | Fix the Cartesian JOIN | 5 |
+| `task_hard_cte` | hard | Rewrite Correlated Subquery as CTE | 6 |
+| `task_expert_rank` | expert | Fix the Tie-Breaking Window Function | 6 |
+| `task_expert_recursive` | expert | Traverse Org Chart with Recursive CTE | 7 |
+| `task_expert_window` | expert | Fix Two Broken Window Functions | 6 |
+
 ### Easy — Fix Syntax Errors
 Three SQL keywords are misspelled (`SELEC`, `FORM`, `WEHRE`). The agent must identify and correct them.
 
 **Schema:** `users(id, name, age, city)` — 6 rows
 **Goal:** Return name and age of users older than 30 in New York, ordered by name
-**Max steps:** 5
 
 ### Medium — Fix the Cartesian JOIN
 A missing `JOIN` condition (`o.product_id = p.id`) causes a cartesian product, inflating every total by 3×. The agent must rewrite using explicit `INNER JOIN … ON` syntax.
 
 **Schema:** `orders`, `users`, `products` — e-commerce dataset
 **Goal:** Correct per-(user, product) total amount spent, ordered by total DESC
-**Max steps:** 5
 
 ### Hard — Rewrite Correlated Subquery as CTE
 A semantically correct but O(N²) query re-executes `AVG(salary)` for every employee row. The agent must rewrite using a `WITH` clause that computes department averages exactly once.
 
 **Schema:** `departments`, `employees` — 9 employees across 3 departments
 **Goal:** Employees who earn strictly above their department average, ordered by dept/salary
-**Max steps:** 6
 
-> Tasks have **structural penalties**: the hard task requires a `WITH` clause (−0.30 if absent); the medium task requires explicit `JOIN` syntax (−0.20 if absent). This prevents an agent from gaming the score by submitting the broken query verbatim.
+### Expert — Fix the Tie-Breaking Window Function
+`ROW_NUMBER()` silently drops tied reps — one per region is kept, tied ones discarded. Agent must use `RANK()` or `DENSE_RANK()` to return all tied top performers.
+
+**Schema:** `sales_reps(id, name, region, revenue)` — 6 reps across 2 regions with ties
+**Goal:** All reps whose revenue is the highest in their region
+
+### Expert — Traverse Org Chart with Recursive CTE
+A hardcoded two-level CTE expansion misses employees deeper in the tree. Agent must use `WITH RECURSIVE` to traverse all levels of the hierarchy.
+
+**Schema:** `employees(id, name, manager_id)` — 14 employees, 4 levels deep
+**Goal:** All 8 subordinates of VP Eng at any depth, ordered by id
+
+### Expert — Fix Two Broken Window Functions
+Both `SUM` and `RANK` window functions are missing `PARTITION BY` but require different `ORDER BY` clauses. Agent must fix both independently.
+
+**Schema:** `quarterly_sales(region, quarter, revenue)` — 8 rows across 2 regions
+**Goal:** Per-region running total (`ORDER BY quarter`) and within-region revenue rank (`ORDER BY revenue DESC`)
+
+> **Structural penalties** are enforced per task level/id to prevent gaming:
+> - `hard`: requires `WITH` clause (−0.30 if absent)
+> - `medium`: requires explicit `JOIN` (−0.20 if absent)
+> - `task_expert_recursive`: requires `WITH RECURSIVE` (−0.30 if absent)
+> - `task_expert_rank`: penalises `ROW_NUMBER()` (−0.20 — drops ties)
+> - `task_expert_window`: requires `PARTITION BY` in both window functions (−0.20 if absent)
 
 ---
 
@@ -189,17 +225,19 @@ Tests all three built-in tasks directly, with progressive SQL attempts:
 ANTHROPIC_API_KEY=your_key .venv/bin/python playbook.py
 ```
 
-### Run the baseline inference script
-Runs a Claude model as an agent against all tasks and reports scores:
+### Run the inference script
+Runs any OpenAI-compatible LLM as an agent against all 6 tasks and reports scores:
 ```bash
-# Default model (claude-haiku-4-5)
-ANTHROPIC_API_KEY=your_key .venv/bin/python baseline.py
+# Against HuggingFace router
+export API_BASE_URL=https://router.huggingface.co/v1
+export MODEL_NAME=meta-llama/Llama-3.1-8B-Instruct
+export HF_TOKEN=your_hf_token
+export ENV_URL=http://127.0.0.1:8000       # or the live HF Space URL
+python inference.py
 
-# Specific model
-ANTHROPIC_API_KEY=your_key .venv/bin/python baseline.py --model claude-opus-4-6
-
-# Single task with verbose output
-ANTHROPIC_API_KEY=your_key .venv/bin/python baseline.py --task task_hard_cte --verbose
+# Against the live HF Space (no local server needed)
+export ENV_URL=https://prithvigg-queryforge.hf.space
+python inference.py
 ```
 
 ### Run the HTTP server
@@ -245,18 +283,20 @@ All three tasks were solved (or near-solved) on the first step, demonstrating th
 ### Examples
 
 ```bash
+BASE=https://prithvigg-queryforge.hf.space   # or http://localhost:8000 for local
+
 # Start an episode pinned to the hard task
-curl -X POST http://localhost:8000/reset \
+curl -X POST $BASE/reset \
   -H "Content-Type: application/json" \
   -d '{"task_id": "task_hard_cte"}'
 
 # Submit a query
-curl -X POST http://localhost:8000/step \
+curl -X POST $BASE/step \
   -H "Content-Type: application/json" \
   -d '{"sql": "WITH dept_avg AS (SELECT department_id, AVG(salary) AS avg_salary FROM employees GROUP BY department_id) SELECT e.name, e.department_id, e.salary FROM employees e JOIN dept_avg d ON e.department_id = d.department_id WHERE e.salary > d.avg_salary ORDER BY e.department_id, e.salary DESC"}'
 
 # List all available tasks
-curl http://localhost:8000/tasks
+curl $BASE/tasks
 ```
 
 ---
@@ -302,16 +342,17 @@ with QueryforgeEnv(base_url="http://localhost:8000") as env:
 queryforge/
 ├── __init__.py                     # Public exports (SQLAction, SQLObservation, TaskSpec, REGISTRY)
 ├── models.py                       # SQLAction, SQLObservation, TaskSpec Pydantic models
-├── tasks.py                        # Built-in tasks + thread-safe TaskRegistry
+├── tasks.py                        # Built-in tasks (easy→expert) + thread-safe TaskRegistry
 ├── judge.py                        # 4-stage grading pipeline (DuckDB + Anthropic)
 ├── client.py                       # QueryforgeEnv client with task management helpers
 ├── playbook.py                     # Local test runner (no server required)
-├── baseline.py                     # Baseline inference script (Claude as agent)
+├── inference.py                    # Baseline inference script (any OpenAI-compatible LLM)
+├── demo.py                         # Gradio interactive demo (mounted at /demo)
 ├── openenv.yaml                    # OpenEnv manifest
 ├── pyproject.toml                  # Project metadata and dependencies
 ├── uv.lock                         # Locked dependencies
 └── server/
-    ├── app.py                      # FastAPI app — core + /tasks REST endpoints
+    ├── app.py                      # FastAPI app — core + /tasks REST endpoints + Gradio mount
     ├── queryforge_environment.py   # Environment class (reset, step, state)
     ├── Dockerfile                  # Container image
     └── requirements.txt            # Server dependencies
