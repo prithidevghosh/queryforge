@@ -16,7 +16,7 @@ Grading pipeline for each submitted SQL query:
     Partial credit for correct row count or partial row matches.
 
   Stage 4 — AI Quality (→ 1.0)
-    Anthropic claude-sonnet-4-6 evaluates optimization, code style, and
+    Anthropic claude-haiku-4-5 evaluates optimization, code style, and
     semantic correctness vs. the reference solution.
     The AI score can move the final score up to 1.0 when rows are correct,
     or provide nuanced feedback even when rows are partially wrong.
@@ -183,16 +183,24 @@ def rows_match(
 
     projected = [_project(row) for row in actual]
 
+    actual_norm = [_normalize(r) for r in projected]
+    expected_norm = [_normalize(r) for r in expected]
+
     if len(projected) != len(expected):
-        overlap_ratio = min(len(projected), len(expected)) / max(len(projected), len(expected))
-        score = 0.3 * overlap_ratio
+        # Count how many returned rows are actually in the expected set
+        expected_set = [tuple(sorted(r.items())) for r in expected_norm]
+        correct_rows = sum(1 for r in actual_norm if tuple(sorted(r.items())) in expected_set)
+        # Score based on fraction of expected rows correctly returned
+        coverage = correct_rows / len(expected)
+        # Base 0.10 for count mismatch, up to 0.45 for high coverage of correct rows
+        score = 0.10 + 0.35 * coverage
         return score, (
             f"Row count mismatch: got {len(projected)}, expected {len(expected)}. "
-            f"({overlap_ratio:.0%} overlap ratio)"
+            f"{correct_rows}/{len(expected)} expected rows present."
         )
 
-    actual_sorted = sorted([_normalize(r) for r in projected], key=lambda r: _sort_key(r, order_by))
-    expected_sorted = sorted([_normalize(r) for r in expected], key=lambda r: _sort_key(r, order_by))
+    actual_sorted = sorted(actual_norm, key=lambda r: _sort_key(r, order_by))
+    expected_sorted = sorted(expected_norm, key=lambda r: _sort_key(r, order_by))
 
     matches = sum(1 for a, e in zip(actual_sorted, expected_sorted) if a == e)
     row_accuracy = matches / len(expected)
@@ -289,7 +297,6 @@ Respond with ONLY valid JSON (no markdown fences):
                 {"role": "assistant", "content": "{"},   # prefill forces JSON-only reply
             ],
         )
-        print("Anthropic judge response:", message.content)
         # Prepend the prefilled "{" back before parsing
         raw = "{" + message.content[0].text.strip()
 
@@ -381,15 +388,35 @@ def grade(
     elif task.level == "medium" and "JOIN " not in query_upper:
         structural_penalty = 0.20  # medium task demands explicit JOINs
         row_feedback += " (Penalty: no explicit JOIN — task requires JOIN … ON syntax.)"
-    elif task.id == "task_expert_recursive" and "RECURSIVE" not in query_upper:
-        structural_penalty = 0.30  # must use recursive CTE, not repeated JOINs
-        row_feedback += " (Penalty: WITH RECURSIVE required — plain JOIN only fetches one level.)"
-    elif task.id == "task_expert_rank" and "ROW_NUMBER" in query_upper:
-        structural_penalty = 0.20  # ROW_NUMBER breaks ties — must use RANK/DENSE_RANK
-        row_feedback += " (Penalty: ROW_NUMBER() drops tied rows — use RANK() or DENSE_RANK().)"
-    elif task.id == "task_expert_window" and "PARTITION BY" not in query_upper:
-        structural_penalty = 0.20  # both window functions need PARTITION BY region
-        row_feedback += " (Penalty: missing PARTITION BY — both SUM and RANK must be partitioned per region.)"
+    elif task.id == "task_expert_recursive":
+        # Two bugs: anchor uses WHERE id=3 (includes VP Eng) + non-recursive CTE (misses deep levels)
+        if "RECURSIVE" not in query_upper:
+            structural_penalty += 0.30
+            row_feedback += " (Penalty: WITH RECURSIVE required — hardcoded levels won't scale.)"
+        if "MANAGER_ID = 3" not in query_upper and "MANAGER_ID=3" not in query_upper:
+            structural_penalty += 0.15
+            row_feedback += " (Penalty: anchor should select subordinates via manager_id, not the VP themselves.)"
+        structural_penalty = min(structural_penalty, 0.40)
+    elif task.id == "task_expert_rank":
+        # Two bugs: ROW_NUMBER (drops ties) + ASC ordering (picks lowest instead of highest)
+        if "ROW_NUMBER" in query_upper:
+            structural_penalty += 0.20
+            row_feedback += " (Penalty: ROW_NUMBER() drops tied rows — use RANK() or DENSE_RANK().)"
+        if "ASC" in query_upper and "DESC" not in query_upper:
+            structural_penalty += 0.15
+            row_feedback += " (Penalty: ordering by revenue ASC picks lowest earners, not highest.)"
+        structural_penalty = min(structural_penalty, 0.35)
+    elif task.id == "task_expert_window":
+        # Three bugs: missing PARTITION BY on both windows + tied revenues need correct ranking
+        if "PARTITION BY" not in query_upper:
+            structural_penalty += 0.20
+            row_feedback += " (Penalty: missing PARTITION BY — both SUM and RANK must be partitioned per region.)"
+        # Count PARTITION BY occurrences — need at least 2 (one per window function)
+        partition_count = query_upper.count("PARTITION BY")
+        if 0 < partition_count < 2:
+            structural_penalty += 0.10
+            row_feedback += " (Penalty: only one window function has PARTITION BY — both need it.)"
+        structural_penalty = min(structural_penalty, 0.30)
 
     details["structural_penalty"] = structural_penalty
 
@@ -405,9 +432,14 @@ def grade(
     details["ai_hint"] = ai_hint
 
     # Final blending:
+    #   AI judge offline (fallback) → use deterministic score directly
     #   rows fully correct  → trust AI score (can reach 1.0)
     #   rows partially wrong → clamp AI score to not exceed deterministic
-    if row_score >= 0.95:
+    ai_is_fallback = abs(ai_score - deterministic_score) < 0.001
+    if ai_is_fallback:
+        # AI judge was unavailable — use deterministic score as-is
+        final_score = deterministic_score
+    elif row_score >= 0.95:
         final_score = ai_score
     elif row_score >= 0.5:
         # Blend: AI provides nuance but can't exceed deterministic ceiling

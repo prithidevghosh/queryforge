@@ -24,7 +24,7 @@ class SQLObservation(Observation):
     # ── Task context ─────────────────────────────────────────────────────────
     task_id: str = Field(default="", description="Active task identifier")
     task_level: str = Field(
-        default="", description="Difficulty: easy | medium | hard"
+        default="", description="Difficulty: easy | medium | hard | expert"
     )
     task_title: str = Field(default="", description="Human-readable task title")
     task_description: str = Field(

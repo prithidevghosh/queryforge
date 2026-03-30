@@ -115,7 +115,7 @@ Fix broken or slow SQL queries and get instant graded feedback.
     )
 )
 
-with gr.Blocks(title="QueryForge", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="QueryForge") as demo:
 
     state = gr.State(None)
 

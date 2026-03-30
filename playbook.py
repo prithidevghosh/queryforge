@@ -3,13 +3,14 @@ QueryForge Client Playbook
 ──────────────────────────
 Tests the environment through the HTTP server using the QueryforgeEnv client.
 
-Requires the server to be running first:
-    uvicorn server.app:app --host 0.0.0.0 --port 8000
-
-Then run:
+Usage:
+    # Against the live HF Space:
     python playbook.py
 
-If ANTHROPIC_API_KEY is set, Stage 4 AI scoring is live.
+    # Against a local server:
+    ENV_URL=http://localhost:8000 python playbook.py
+
+If ANTHROPIC_API_KEY is set on the server, Stage 4 AI scoring is live.
 If not set, the judge falls back to deterministic scoring (capped at 0.80).
 """
 
@@ -23,7 +24,7 @@ from client import QueryforgeEnv
 from models import SQLAction, TaskSpec
 from tasks import REGISTRY, task_from_dict
 
-BASE_URL = "https://prithvigg-queryforge.hf.space"
+BASE_URL = os.environ.get("ENV_URL", "https://prithvigg-queryforge.hf.space")
 
 # ── Formatting helpers ────────────────────────────────────────────────────────
 
@@ -239,10 +240,10 @@ if __name__ == "__main__":
     _hr("═")
 
     with QueryforgeEnv(base_url=BASE_URL).sync() as client:
-        # run_easy(client)
+        run_easy(client)
         run_medium(client)
         run_hard(client)
-        # run_custom(client)
+        run_custom(client)
 
     _section("DONE")
-    print("  All 4 tasks completed.\n")
+    print("  All tasks completed.\n")

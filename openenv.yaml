@@ -11,16 +11,20 @@ description: |
   An agent receives a broken or slow SQL query together with the schema and an
   error/performance warning. It must produce a working, optimised query.
 
-  Tasks (3 levels, cycled in order):
+  Tasks (6 tasks across 4 difficulty levels):
     easy   — fix three misspelled SQL keywords (SELECT / FROM / WHERE)
     medium — fix a missing JOIN condition that causes a cartesian product
     hard   — rewrite a correlated subquery (O(N²)) as a CTE (O(N))
+    expert — fix tie-breaking window function (2 bugs: ROW_NUMBER + ASC ordering)
+    expert — traverse org chart with recursive CTE (2 bugs: wrong anchor + hardcoded levels)
+    expert — fix broken window functions (3 bugs: missing PARTITION BY + tied revenues)
 
   Reward signal (0.0 – 1.0):
     0.00        syntax error
     0.15        syntax valid, runtime error
     0.30        executes, wrong / empty results
     0.30–0.80   partial row correctness (deterministic, DuckDB)
-    0.80–1.00   correct results + AI quality score (Anthropic claude-sonnet-4-6)
+    0.80–1.00   correct results + AI quality score (Anthropic claude-haiku-4-5)
 
-  Required env var: ANTHROPIC_API_KEY
+  Optional env var: ANTHROPIC_API_KEY (enables AI judge for scores up to 1.0;
+  without it, scoring is fully deterministic and capped at 0.80)

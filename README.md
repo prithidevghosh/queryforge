@@ -143,30 +143,30 @@ A semantically correct but O(N²) query re-executes `AVG(salary)` for every empl
 **Schema:** `departments`, `employees` — 9 employees across 3 departments
 **Goal:** Employees who earn strictly above their department average, ordered by dept/salary
 
-### Expert — Fix the Tie-Breaking Window Function
-`ROW_NUMBER()` silently drops tied reps — one per region is kept, tied ones discarded. Agent must use `RANK()` or `DENSE_RANK()` to return all tied top performers.
+### Expert — Fix the Tie-Breaking Window Function (2 bugs)
+Two layered bugs: `ROW_NUMBER()` drops tied reps AND `ORDER BY revenue ASC` picks the lowest earners instead of the highest. Agent must fix the sort order AND switch to `RANK()`/`DENSE_RANK()` — fixing only one still produces wrong results.
 
 **Schema:** `sales_reps(id, name, region, revenue)` — 6 reps across 2 regions with ties
 **Goal:** All reps whose revenue is the highest in their region
 
-### Expert — Traverse Org Chart with Recursive CTE
-A hardcoded two-level CTE expansion misses employees deeper in the tree. Agent must use `WITH RECURSIVE` to traverse all levels of the hierarchy.
+### Expert — Traverse Org Chart with Recursive CTE (2 bugs)
+Two layered bugs: the anchor uses `WHERE id = 3` (includes VP Eng himself in results) AND the query is a hardcoded two-level CTE that misses deeper employees. Agent must fix the anchor to `WHERE manager_id = 3` AND convert to `WITH RECURSIVE`.
 
 **Schema:** `employees(id, name, manager_id)` — 14 employees, 4 levels deep
-**Goal:** All 8 subordinates of VP Eng at any depth, ordered by id
+**Goal:** All 8 subordinates of VP Eng at any depth (excluding VP Eng), ordered by id
 
-### Expert — Fix Two Broken Window Functions
-Both `SUM` and `RANK` window functions are missing `PARTITION BY` but require different `ORDER BY` clauses. Agent must fix both independently.
+### Expert — Fix Broken Window Functions (3 bugs)
+Three layered bugs: both `SUM` and `RANK` window functions are missing `PARTITION BY`, they need different `ORDER BY` clauses, AND the data contains tied revenue values (West Q3=Q4=16000) that must be ranked correctly.
 
-**Schema:** `quarterly_sales(region, quarter, revenue)` — 8 rows across 2 regions
-**Goal:** Per-region running total (`ORDER BY quarter`) and within-region revenue rank (`ORDER BY revenue DESC`)
+**Schema:** `quarterly_sales(region, quarter, revenue)` — 8 rows across 2 regions with ties
+**Goal:** Per-region running total (`ORDER BY quarter`) and within-region revenue rank (`ORDER BY revenue DESC`) with correct tie handling
 
 > **Structural penalties** are enforced per task level/id to prevent gaming:
 > - `hard`: requires `WITH` clause (−0.30 if absent)
 > - `medium`: requires explicit `JOIN` (−0.20 if absent)
-> - `task_expert_recursive`: requires `WITH RECURSIVE` (−0.30 if absent)
-> - `task_expert_rank`: penalises `ROW_NUMBER()` (−0.20 — drops ties)
-> - `task_expert_window`: requires `PARTITION BY` in both window functions (−0.20 if absent)
+> - `task_expert_recursive`: requires `WITH RECURSIVE` (−0.30) + correct anchor via `manager_id` (−0.15)
+> - `task_expert_rank`: penalises `ROW_NUMBER()` (−0.20) + penalises `ASC` ordering without `DESC` (−0.15)
+> - `task_expert_window`: requires `PARTITION BY` in both window functions (−0.20 if absent, −0.10 if only one)
 
 ---
 
@@ -249,19 +249,19 @@ uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
 
 ## Baseline Results
 
-The following scores were produced by running `claude-haiku-4-5` as the agent against all three tasks with the full AI judge active. These serve as the reproducible baseline for this environment.
+The following scores were produced by running `meta-llama/Llama-3.1-8B-Instruct` (via HuggingFace router) as the agent against all 6 tasks with the full AI judge active.
 
 | Task | Level | Steps Used | Best Score |
 |---|---|---|---|
 | Fix the Syntax Errors | easy | 1 | **1.000** |
 | Fix the Cartesian JOIN | medium | 1 | **0.900** |
-| Rewrite Correlated Subquery as CTE | hard | 1 | **0.950** |
-| **Average** | | | **0.950** |
+| Rewrite Correlated Subquery as CTE | hard | 1 | **0.900** |
+| Fix the Tie-Breaking Window Function | expert | 1 | **1.000** |
+| Traverse Org Chart with Recursive CTE | expert | 2 | **0.900** |
+| Fix Two Broken Window Functions | expert | 3 | **0.900** |
+| **Average** | | | **0.933** |
 
-All three tasks were solved (or near-solved) on the first step, demonstrating that:
-- The reward pipeline returns meaningful signal immediately
-- The environment terminates cleanly when the done threshold (≥ 0.90) is met
-- A stronger model or a harder task set would produce more training-relevant trajectories
+The easy–hard tasks and the rank/recursive expert tasks were solved in 1–2 steps. The dual-window expert task required 3 steps, demonstrating the feedback loop produces training-relevant multi-step trajectories for harder tasks.
 
 ---
 
@@ -348,13 +348,13 @@ queryforge/
 ├── playbook.py                     # Local test runner (no server required)
 ├── inference.py                    # Baseline inference script (any OpenAI-compatible LLM)
 ├── demo.py                         # Gradio interactive demo (mounted at /demo)
+├── Dockerfile                      # Container image
 ├── openenv.yaml                    # OpenEnv manifest
 ├── pyproject.toml                  # Project metadata and dependencies
 ├── uv.lock                         # Locked dependencies
 └── server/
     ├── app.py                      # FastAPI app — core + /tasks REST endpoints + Gradio mount
     ├── queryforge_environment.py   # Environment class (reset, step, state)
-    ├── Dockerfile                  # Container image
     └── requirements.txt            # Server dependencies
 ```
 
@@ -373,7 +373,7 @@ Add `ANTHROPIC_API_KEY` as a Space secret after deployment. Without it, the envi
 ### Docker
 
 ```bash
-docker build -t queryforge:latest -f server/Dockerfile .
+docker build -t queryforge:latest .
 docker run -p 8000:8000 -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY queryforge:latest
 ```
 

@@ -188,9 +188,8 @@ def run_task(task_id: str, llm: OpenAI, env_client) -> dict:
 
 def main() -> None:
     # ── Validate required config ──────────────────────────────────────────────
-    missing = [v for v in ("API_BASE_URL", "MODEL_NAME") if not os.getenv(v)]
-    if missing:
-        print(f"ERROR: missing required env vars: {', '.join(missing)}")
+    if not MODEL_NAME:
+        print("ERROR: MODEL_NAME env var is not set.")
         sys.exit(1)
 
     if not API_KEY:

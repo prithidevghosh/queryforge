@@ -22,6 +22,10 @@ dependencies = [
     "duckdb>=0.10.0",
     # AI judge — quality scoring via Anthropic API
     "anthropic>=0.25.0",
+    # Interactive demo UI (mounted at /demo on the FastAPI server)
+    "gradio>=4.0.0",
+    # Inference script uses the OpenAI client
+    "openai>=1.0.0",
 ]
 
 [project.optional-dependencies]

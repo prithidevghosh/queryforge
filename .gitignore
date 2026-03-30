@@ -1,3 +1,6 @@
+# Claude Code local settings (machine-specific, not for VCS)
+.claude/settings.local.json
+
 # Virtual environment
 .venv/
 venv/
