@@ -29,7 +29,7 @@ from models import SQLAction
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 MODEL_NAME   = os.getenv("MODEL_NAME")
-ENV_URL      = os.getenv("ENV_URL", "http://127.0.0.1:8000")
+ENV_URL      = os.getenv("ENV_URL", "https://prithvigg-queryforge.hf.space")
 
 MAX_STEPS   = 5      # max attempts per task (overridden by task's own max_steps)
 TEMPERATURE = 0.2
