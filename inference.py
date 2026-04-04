@@ -7,8 +7,13 @@ MANDATORY env vars:
   HF_TOKEN       Your Hugging Face / API key
 
 Optional env vars:
-  ENV_URL          QueryForge environment server URL (default: http://localhost:8000)
+  ENV_URL          QueryForge environment server URL (default: live HF Space)
   ANTHROPIC_API_KEY  Enables AI judge for scores up to 1.0 (default: deterministic mode)
+
+STDOUT FORMAT (required by evaluator):
+  [START] task=<task_id> env=queryforge model=<model_name>
+  [STEP]  step=<n> action=<sql_oneline> reward=<0.00> done=<true|false> error=<msg|null>
+  [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...>
 """
 
 import os
@@ -31,9 +36,10 @@ API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 MODEL_NAME   = os.getenv("MODEL_NAME")
 ENV_URL      = os.getenv("ENV_URL", "https://prithvigg-queryforge.hf.space")
 
-MAX_STEPS   = 5      # max attempts per task (overridden by task's own max_steps)
-TEMPERATURE = 0.2
-MAX_TOKENS  = 512
+MAX_STEPS              = 5
+TEMPERATURE            = 0.2
+MAX_TOKENS             = 512
+SUCCESS_SCORE_THRESHOLD = 0.9
 
 TASK_IDS = [
     "task_easy_syntax",
@@ -58,20 +64,44 @@ SYSTEM_PROMPT = textwrap.dedent("""
     - If you receive grading feedback on a previous attempt, use it to improve.
 """).strip()
 
+# ── Structured log helpers (evaluator-required format) ────────────────────────
+
+def log_start(task: str, model: str) -> None:
+    print(f"[START] task={task} env=queryforge model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    # SQL may contain newlines — collapse to single line (spec: no newlines within a line)
+    action_oneline = " ".join(action.split())
+    error_val = error if error else "null"
+    print(
+        f"[STEP] step={step} action={action_oneline} reward={reward:.2f}"
+        f" done={str(done).lower()} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps}"
+        f" score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
+
 # ── SQL extraction ─────────────────────────────────────────────────────────────
 
 _SQL_BLOCK = re.compile(r"```(?:sql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
 def extract_sql(text: str) -> str:
-    """Pull the first SQL code block from the model response."""
     match = _SQL_BLOCK.search(text)
     if match:
         return match.group(1).strip()
     return text.strip()
 
 
-# ── Formatting ────────────────────────────────────────────────────────────────
+# ── Formatting helpers (human-readable output) ────────────────────────────────
 
 def score_bar(score: float, width: int = 25) -> str:
     filled = int(score * width)
@@ -85,15 +115,14 @@ def hr(char="═", width=70):
 # ── Per-task agent loop ────────────────────────────────────────────────────────
 
 def run_task(task_id: str, llm: OpenAI, env_client) -> dict:
-    """
-    Run one episode for a single task.
-    Returns dict with task_id, task_title, task_level, best_score, attempts, done.
-    """
     result = env_client.reset(task_id=task_id)
-    obs = result.observation
+    obs    = result.observation
+
+    log_start(task=task_id, model=MODEL_NAME)
 
     if result.done:
         print(f"  ERROR loading task: {obs.feedback}")
+        log_end(success=False, steps=0, score=0.0, rewards=[])
         return {"task_id": task_id, "best_score": 0.0, "attempts": 0, "done": False}
 
     print(f"\n  Task  : {obs.task_title}  [{obs.task_level}]")
@@ -109,89 +138,100 @@ def run_task(task_id: str, llm: OpenAI, env_client) -> dict:
         },
     ]
 
-    step = 0
-    while not result.done:
-        step += 1
+    step    = 0
+    rewards: List[float] = []
+    success = False
 
-        try:
-            completion = llm.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-                temperature=TEMPERATURE,
-                max_tokens=MAX_TOKENS,
-                stream=False,
-            )
-            response_text = completion.choices[0].message.content or ""
-        except Exception as exc:
-            print(f"  LLM call failed at step {step}: {exc}")
-            break
+    try:
+        while not result.done:
+            step += 1
 
-        sql = extract_sql(response_text)
+            try:
+                completion = llm.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=messages,
+                    temperature=TEMPERATURE,
+                    max_tokens=MAX_TOKENS,
+                    stream=False,
+                )
+                response_text = completion.choices[0].message.content or ""
+            except Exception as exc:
+                print(f"  LLM call failed at step {step}: {exc}")
+                break
 
-        # ── Print generated SQL ───────────────────────────────────────────────
-        print(f"\n  ┌─ Step {step} · SQL submitted {'─' * (50 - len(str(step)))}")
-        for line in sql.splitlines():
-            print(f"  │  {line}")
-        print(f"  └{'─' * 56}")
+            sql = extract_sql(response_text)
 
-        result = env_client.step(SQLAction(sql=sql))
-        obs = result.observation
+            print(f"\n  ┌─ Step {step} · SQL submitted {'─' * (50 - len(str(step)))}")
+            for line in sql.splitlines():
+                print(f"  │  {line}")
+            print(f"  └{'─' * 56}")
 
-        score = result.reward or 0.0
-        done_marker = "  ✓ DONE" if result.done else ""
-        print(f"  Score : {score_bar(score)}{done_marker}")
+            result = env_client.step(SQLAction(sql=sql))
+            obs    = result.observation
 
-        if not obs.syntax_valid:
-            print(f"  ✗ Syntax error — query could not be parsed")
-        elif not obs.execution_success:
-            print(f"  ✗ Execution failed — {(obs.execution_error or '')[:80]}")
-        else:
-            print(f"  ✓ Executed · rows returned: {obs.rows_returned}")
+            reward = result.reward or 0.0
+            rewards.append(reward)
 
-        if result.done:
-            break
+            # Determine error string for [STEP] log
+            if not obs.syntax_valid:
+                step_error = "syntax_error"
+                print(f"  ✗ Syntax error — query could not be parsed")
+            elif not obs.execution_success:
+                step_error = (obs.execution_error or "execution_error")[:120]
+                print(f"  ✗ Execution failed — {step_error[:80]}")
+            else:
+                step_error = None
+                print(f"  ✓ Executed · rows returned: {obs.rows_returned}")
 
-        # ── Why are we going to the next step? ───────────────────────────────
-        print(f"\n  ↻ Retrying — score {score:.3f} below threshold")
-        if obs.feedback:
-            # Split the feedback into its tagged sections for readable multi-line output
-            for part in obs.feedback.split("  "):
-                part = part.strip()
-                if part:
-                    print(f"  {part}")
-        if obs.hint:
-            print(f"  Hint     : {obs.hint[:120]}")
+            done_marker = "  ✓ DONE" if result.done else ""
+            print(f"  Score : {score_bar(reward)}{done_marker}")
 
-        # Feed grading result back to the model for the next attempt
-        messages.append({"role": "assistant", "content": response_text})
-        messages.append({
-            "role": "user",
-            "content": (
-                f"Your query scored {result.reward:.3f}.\n\n"
-                f"Feedback: {obs.feedback}\n\n"
-                f"Hint: {obs.hint}\n\n"
-                "Please submit an improved SQL query."
-            ),
-        })
+            log_step(step=step, action=sql, reward=reward, done=result.done, error=step_error)
+
+            if result.done:
+                break
+
+            print(f"\n  ↻ Retrying — score {reward:.3f} below threshold")
+            if obs.feedback:
+                for part in obs.feedback.split("  "):
+                    part = part.strip()
+                    if part:
+                        print(f"  {part}")
+            if obs.hint:
+                print(f"  Hint     : {obs.hint[:120]}")
+
+            messages.append({"role": "assistant", "content": response_text})
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Your query scored {reward:.3f}.\n\n"
+                    f"Feedback: {obs.feedback}\n\n"
+                    f"Hint: {obs.hint}\n\n"
+                    "Please submit an improved SQL query."
+                ),
+            })
+
+        success = obs.best_score >= SUCCESS_SCORE_THRESHOLD
+
+    finally:
+        log_end(success=success, steps=step, score=obs.best_score, rewards=rewards)
 
     return {
-        "task_id": task_id,
+        "task_id":    task_id,
         "task_title": obs.task_title,
         "task_level": obs.task_level,
         "best_score": obs.best_score,
-        "attempts": obs.attempt,
-        "done": result.done,
+        "attempts":   obs.attempt,
+        "done":       result.done,
     }
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # ── Validate required config ──────────────────────────────────────────────
     if not MODEL_NAME:
         print("ERROR: MODEL_NAME env var is not set.")
         sys.exit(1)
-
     if not API_KEY:
         print("ERROR: HF_TOKEN (or API_KEY) is not set.")
         sys.exit(1)
@@ -206,14 +246,12 @@ def main() -> None:
     hr()
 
     results = []
-
     with QueryforgeEnv(base_url=ENV_URL).sync() as env_client:
         for task_id in TASK_IDS:
             print(f"\n{'─' * 70}")
-            result = run_task(task_id, llm, env_client)
-            results.append(result)
+            results.append(run_task(task_id, llm, env_client))
 
-    # ── Results table ─────────────────────────────────────────────────────────
+    # ── Results summary ───────────────────────────────────────────────────────
     print(f"\n{'═' * 70}")
     print("  RESULTS")
     print(f"  Model: {MODEL_NAME}")
@@ -223,11 +261,11 @@ def main() -> None:
 
     total = 0.0
     for r in results:
-        title   = r.get("task_title", r["task_id"])[:27]
-        level   = r.get("task_level", "?")
-        steps   = r.get("attempts", "?")
-        score   = r["best_score"]
-        total  += score
+        title  = r.get("task_title", r["task_id"])[:27]
+        level  = r.get("task_level", "?")
+        steps  = r.get("attempts", "?")
+        score  = r["best_score"]
+        total += score
         print(f"  {title:<28} {level:<8} {steps:>5}  {score_bar(score)}")
 
     avg = total / len(results) if results else 0.0
