@@ -352,7 +352,7 @@ def grade(
     details["syntax_error"] = syntax_error
 
     if not syntax_ok:
-        return 0.0, f"Syntax error: {syntax_error}", details
+        return 0.001, f"Syntax error: {syntax_error}", details
 
     # ── Stage 2: execution ───────────────────────────────────────────────────
     exec_ok, rows, exec_error = execute_query(task.schema_ddl, agent_query)
@@ -448,7 +448,7 @@ def grade(
         # Low row accuracy — stay near deterministic
         final_score = min(deterministic_score, ai_score * 0.6)
 
-    final_score = max(0.0, min(1.0, final_score))
+    final_score = max(0.001, min(0.999, final_score))
 
     feedback = (
         f"[Rows] {row_feedback}  "
