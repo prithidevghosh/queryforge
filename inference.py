@@ -33,7 +33,7 @@ from models import SQLAction
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-MODEL_NAME   = os.getenv("MODEL_NAME")
+MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
 ENV_URL      = os.getenv("ENV_URL", "https://prithvigg-queryforge.hf.space")
 
 MAX_STEPS              = 5
@@ -115,34 +115,42 @@ def hr(char="═", width=70):
 # ── Per-task agent loop ────────────────────────────────────────────────────────
 
 def run_task(task_id: str, llm: OpenAI, env_client) -> dict:
-    result = env_client.reset(task_id=task_id)
-    obs    = result.observation
+    # Initialise before anything that can throw — guarantees [END] is always emitted.
+    step       = 0
+    rewards: List[float] = []
+    success    = False
+    best_score = 0.0
+    task_title = task_id
+    task_level = "unknown"
+    attempts   = 0
+    done       = False
 
     log_start(task=task_id, model=MODEL_NAME)
 
-    if result.done:
-        print(f"  ERROR loading task: {obs.feedback}")
-        log_end(success=False, steps=0, score=0.0, rewards=[])
-        return {"task_id": task_id, "best_score": 0.0, "attempts": 0, "done": False}
-
-    print(f"\n  Task  : {obs.task_title}  [{obs.task_level}]")
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"Here is your SQL challenge:\n\n{obs.task_description}\n\n"
-                "Provide your fixed SQL query."
-            ),
-        },
-    ]
-
-    step    = 0
-    rewards: List[float] = []
-    success = False
-
     try:
+        result = env_client.reset(task_id=task_id)
+        obs    = result.observation
+
+        if result.done:
+            print(f"  ERROR loading task: {obs.feedback}")
+            log_end(success=False, steps=0, score=0.0, rewards=[])
+            return {"task_id": task_id, "best_score": 0.0, "attempts": 0, "done": False}
+
+        task_title = obs.task_title
+        task_level = obs.task_level
+        print(f"\n  Task  : {task_title}  [{task_level}]")
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Here is your SQL challenge:\n\n{obs.task_description}\n\n"
+                    "Provide your fixed SQL query."
+                ),
+            },
+        ]
+
         while not result.done:
             step += 1
 
@@ -171,10 +179,10 @@ def run_task(task_id: str, llm: OpenAI, env_client) -> dict:
 
             reward = result.reward or 0.0
             rewards.append(reward)
+            done = result.done
 
-            # Determine error string for [STEP] log
             if not obs.syntax_valid:
-                step_error = "syntax_error"
+                step_error: Optional[str] = "syntax_error"
                 print(f"  ✗ Syntax error — query could not be parsed")
             elif not obs.execution_success:
                 step_error = (obs.execution_error or "execution_error")[:120]
@@ -183,12 +191,12 @@ def run_task(task_id: str, llm: OpenAI, env_client) -> dict:
                 step_error = None
                 print(f"  ✓ Executed · rows returned: {obs.rows_returned}")
 
-            done_marker = "  ✓ DONE" if result.done else ""
+            done_marker = "  ✓ DONE" if done else ""
             print(f"  Score : {score_bar(reward)}{done_marker}")
 
-            log_step(step=step, action=sql, reward=reward, done=result.done, error=step_error)
+            log_step(step=step, action=sql, reward=reward, done=done, error=step_error)
 
-            if result.done:
+            if done:
                 break
 
             print(f"\n  ↻ Retrying — score {reward:.3f} below threshold")
@@ -211,27 +219,29 @@ def run_task(task_id: str, llm: OpenAI, env_client) -> dict:
                 ),
             })
 
-        success = obs.best_score >= SUCCESS_SCORE_THRESHOLD
+        best_score = obs.best_score
+        attempts   = obs.attempt
+        success    = best_score >= SUCCESS_SCORE_THRESHOLD
+
+    except Exception as exc:
+        print(f"  FATAL error in task {task_id}: {exc}", flush=True)
 
     finally:
-        log_end(success=success, steps=step, score=obs.best_score, rewards=rewards)
+        log_end(success=success, steps=step, score=best_score, rewards=rewards)
 
     return {
         "task_id":    task_id,
-        "task_title": obs.task_title,
-        "task_level": obs.task_level,
-        "best_score": obs.best_score,
-        "attempts":   obs.attempt,
-        "done":       result.done,
+        "task_title": task_title,
+        "task_level": task_level,
+        "best_score": best_score,
+        "attempts":   attempts,
+        "done":       done,
     }
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    if not MODEL_NAME:
-        print("ERROR: MODEL_NAME env var is not set.")
-        sys.exit(1)
     if not API_KEY:
         print("ERROR: HF_TOKEN (or API_KEY) is not set.")
         sys.exit(1)
@@ -246,10 +256,15 @@ def main() -> None:
     hr()
 
     results = []
-    with QueryforgeEnv(base_url=ENV_URL).sync() as env_client:
-        for task_id in TASK_IDS:
-            print(f"\n{'─' * 70}")
-            results.append(run_task(task_id, llm, env_client))
+    try:
+        env_ctx = QueryforgeEnv(base_url=ENV_URL).sync()
+        with env_ctx as env_client:
+            for task_id in TASK_IDS:
+                print(f"\n{'─' * 70}")
+                results.append(run_task(task_id, llm, env_client))
+    except Exception as exc:
+        print(f"FATAL: could not connect to environment at {ENV_URL}: {exc}", flush=True)
+        sys.exit(1)
 
     # ── Results summary ───────────────────────────────────────────────────────
     print(f"\n{'═' * 70}")
